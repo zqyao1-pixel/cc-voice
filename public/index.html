@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#6366f1">
+  <title>CC Voice</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- ═══ Pairing Screen (relay mode) ═══ -->
+  <div class="login-screen" id="pairScreen" style="display:none">
+    <div class="login-card">
+      <div class="login-logo">📡</div>
+      <h1 class="login-title">CC Voice</h1>
+      <p class="login-subtitle" id="pairSubtitle">输入配对码连接你的电脑</p>
+      <input class="login-input pair-code-input" id="pairCodeInput" type="text" placeholder="6 位配对码" maxlength="6" autocomplete="off" style="text-align:center;font-size:1.5em;letter-spacing:0.3em;text-transform:uppercase">
+      <div class="login-error" id="pairError"></div>
+      <button class="login-btn" id="pairBtn">连接</button>
+      <p class="login-hint" id="pairHint">在电脑终端运行 <code>npx cc-voice</code> 获取配对码</p>
+    </div>
+  </div>
+
+  <!-- ═══ Login Screen ═══ -->
+  <div class="login-screen" id="loginScreen">
+    <div class="login-card">
+      <div class="login-logo">🎙️</div>
+      <h1 class="login-title">CC Voice</h1>
+      <p class="login-subtitle" id="loginSubtitle">输入昵称开始</p>
+      <input class="login-input" id="loginNickname" type="text" placeholder="你的昵称" autocomplete="off">
+      <input class="login-input login-referral" id="loginReferral" type="text" placeholder="邀请码（首位用户免填）" autocomplete="off">
+      <div class="login-error" id="loginError"></div>
+      <button class="login-btn" id="loginBtn">注册 / 登录</button>
+      <p class="login-hint">首位用户免邀请码；已有账号输入昵称即可登录</p>
+    </div>
+  </div>
+
+  <!-- ═══ Main App (hidden until logged in) ═══ -->
+  <div id="mainApp" style="display:none">
+
+    <!-- Sidebar overlay -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title" id="sidebarTitle">对话列表</span>
+        <button class="sidebar-close" id="sidebarClose">✕</button>
+      </div>
+
+      <!-- Tab buttons -->
+      <div class="sidebar-tabs">
+        <button class="sidebar-tab tab-active" id="convsTabBtn">💬 对话</button>
+        <button class="sidebar-tab" id="friendsTabBtn">👥 好友</button>
+      </div>
+
+      <div class="sidebar-actions">
+        <button class="sidebar-btn new-conv-btn" id="newConvBtn">+ AI 对话</button>
+        <button class="sidebar-btn add-friend-btn" id="addFriendBtn" style="display:none">+ 添加好友</button>
+        <button class="sidebar-btn" id="searchToggleBtn">🔍</button>
+        <button class="sidebar-btn" id="starredBtn">⭐</button>
+      </div>
+
+      <!-- My invite code -->
+      <div class="my-invite-code" id="myInviteCode" style="display:none"></div>
+
+      <!-- Add friend panel -->
+      <div class="add-friend-panel" id="addFriendPanel" style="display:none">
+        <input class="add-friend-input" id="addFriendInput" type="text" placeholder="输入对方邀请码">
+        <button class="add-friend-submit" id="addFriendSubmit">添加</button>
+      </div>
+
+      <!-- Search box (hidden by default) -->
+      <div class="search-box" id="searchBox" style="display:none">
+        <input class="search-input" id="searchInput" type="text" placeholder="搜索消息...">
+        <div class="search-results" id="searchResults"></div>
+      </div>
+      <!-- Starred panel (hidden by default) -->
+      <div class="starred-panel" id="starredPanel" style="display:none">
+        <div class="starred-list" id="starredList"></div>
+      </div>
+
+      <!-- Conversation list -->
+      <div class="conv-list" id="convList"></div>
+
+      <!-- Friends list -->
+      <div class="friends-list" id="friendsList" style="display:none"></div>
+    </div>
+
+    <div id="app">
+      <!-- Header -->
+      <div class="header">
+        <div style="display:flex;align-items:center;gap:10px">
+          <button class="icon-btn" id="menuBtn">☰</button>
+          <div>
+            <div class="header-title" id="title"></div>
+            <div class="header-subtitle" id="subtitle"></div>
+          </div>
+        </div>
+        <div class="header-actions">
+          <div class="conn-badge disconnected" id="connBadge">
+            <span class="conn-dot"></span>
+            <span id="connText"></span>
+          </div>
+          <button class="icon-btn lang" id="langBtn"></button>
+          <button class="icon-btn" id="settingsBtn">⚙</button>
+          <button class="icon-btn logout-btn" id="logoutBtn" title="登出">⏏</button>
+        </div>
+      </div>
+
+      <!-- Settings Panel -->
+      <div class="settings-panel" id="settingsPanel" style="display:none">
+        <div class="settings-label" id="serverUrlLabel"></div>
+        <input class="settings-input" id="serverUrlInput" type="text">
+        <div class="settings-actions">
+          <button class="btn-primary" id="settingsSaveBtn"></button>
+          <button class="btn-secondary" id="settingsCancelBtn"></button>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div class="messages" id="messages"></div>
+
+      <!-- Input Area -->
+      <div class="input-area">
+        <div class="input-row">
+          <input class="text-input" id="textInput" type="text" autocomplete="off">
+          <button class="send-btn" id="sendBtn"></button>
+        </div>
+        <button class="voice-btn" id="voiceBtn">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+          <span class="voice-btn-label" id="voiceLabel"></span>
+        </button>
+      </div>
+    </div>
+
+  </div><!-- /mainApp -->
+
+  <script src="/app.js"></script>
+</body>
+</html>

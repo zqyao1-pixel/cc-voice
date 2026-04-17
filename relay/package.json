@@ -1,0 +1,14 @@
+{
+  "name": "ccvoice-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CC Voice 公共中继服务 (Cloudflare Worker + Durable Object)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,25 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "ccvoice-relay"
+main = "src/index.js"
+compatibility_date = "2026-04-17"
+
+# 静态文件：复用主项目的 public/ 目录
+# binding = ASSETS 让 Worker 控制路由，API 优先于静态文件
+[assets]
+directory = "../public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# Durable Object: 配对房间
+[[durable_objects.bindings]]
+name = "RELAY_ROOM"
+class_name = "RelayRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayRoom"]
+
+# 自定义域名绑定（ccvoice.app）
+# 需要在 Cloudflare Dashboard 里把 ccvoice.app 指向这个 Worker
+# [routes]
+# route = "ccvoice.app/*"
