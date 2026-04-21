@@ -496,7 +496,7 @@ function printPairInfo() {
     pubKey: keyPair.publicKey.toString('base64'),
   });
 
-  const pairUrl = `${RELAY_URL}/#pair=${relayCode}`;
+  const pairUrl = `${RELAY_URL}/v3/#pair=${relayCode}`;
 
   console.log('');
   console.log('  ╔══════════════════════════════════════════════════╗');

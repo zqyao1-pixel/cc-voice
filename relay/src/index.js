@@ -203,6 +203,14 @@ export default {
       return room.fetch(request);
     }
 
+    // 根路径重定向到 v3 前端（保留 hash）
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      return new Response(null, {
+        status: 302,
+        headers: { Location: '/v3/' + (url.hash || '') },
+      });
+    }
+
     // 静态文件
     if (env.ASSETS) {
       return env.ASSETS.fetch(request);

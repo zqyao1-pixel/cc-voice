@@ -1,154 +1,91 @@
-# CC Voice
+# ccvoice
 
-语音控制 Claude Code + 好友 IM — 从手机远程操控 Claude Code 编程，同时和好友实时聊天，@Claude 随时唤起 AI 助手。
+手机遥控你的 Claude Code — 端到端加密，零知识中继。
 
-## 架构
-
-```
-iPhone / 手机浏览器 (PWA)
-  ├── 登录 → 昵称注册，Token 认证
-  ├── 按住麦克风 → Web Speech API 语音转文字
-  ├── 文字输入框（支持 @Claude 唤起 AI）
-  └── WebSocket 双向通信（实时消息推送）
-        ↕  (Cloudflare Tunnel / HTTPS)
-Node.js 服务端 (端口 3456)
-  ├── Express REST API + 静态文件
-  ├── SQLite 持久化（用户/好友/会话/消息）
-  ├── WebSocket 服务端（多用户在线状态）
-  └── 桥接层 → cc-connect
-        ↕
-cc-connect → Claude Code CLI → 执行任务
-```
+Remote control Claude Code from your phone with E2E encryption.
 
 ## 快速开始
 
-### 方式 A：Cloudflare Tunnel（推荐，无需同一 WiFi）
-
-```bash
-# 1. 安装依赖
-cd cc-voice
-npm install
-
-# 2. 启动服务
-npm start
-
-# 3. 另一个终端，启动隧道（自动分配公网 HTTPS 地址）
-chmod +x start-tunnel.sh
-./start-tunnel.sh
-
-# 4. 手机 Safari 打开隧道分配的 https://xxx.trycloudflare.com 地址
-```
-
-### 方式 B：局域网 HTTPS（需同一 WiFi + 证书信任）
-
-```bash
-# 1. 安装依赖
-npm install
-
-# 2. 配置 HTTPS 证书
-chmod +x setup-https.sh
-./setup-https.sh
-
-# 3. 启动
-npm start
-
-# 4. iPhone Safari → https://<局域网IP>:3456
-#    首次需信任 CA 证书（访问 https://<IP>:3456/ca.pem 下载安装）
-```
-
-## 接入真实 Claude Code
-
-安装 cc-connect 后：
-
 ```bash
 # 安装
-npm install -g cc-connect
+npm install -g ccvoice
 
-# 启动 cc-connect
-cc-connect
-
-# 启动 CC Voice（CLI 桥接模式）
-BRIDGE_MODE=cli npm start
-
-# 或使用 Management API 模式
-BRIDGE_MODE=management-api CC_API_BASE=http://localhost:8080 npm start
+# 启动（自动生成配对码 + QR 码）
+ccvoice
 ```
+
+手机扫码或访问 [ccvoice.app](https://ccvoice.app)，输入配对码即可连接。
+
+## 工作原理
+
+```
+手机浏览器 (ccvoice.app)                    你的 Mac/PC
+  ├── 输入配对码                              ├── ccvoice CLI
+  ├── X25519 密钥交换 ──────┐    ┌──────── X25519 密钥交换
+  ├── 语音/文字输入           │    │          ├── 管理 Claude Code 会话
+  └── 终端事件流渲染          │    │          └── --resume 上下文连续
+                              ↓    ↓
+                    Cloudflare Relay (零知识)
+                      只转发加密 blob，不解密
+```
+
+### 安全模型
+
+- **X25519 ECDH** 密钥交换：配对时手机和 CLI 各生成密钥对，通过 relay 交换公钥
+- **AES-256-GCM** 加密所有消息：relay 只看到密文，无法读取内容
+- **零知识中继**：Cloudflare Worker 只做消息路由，不存储、不解析
 
 ## 功能
 
-**用户系统**
-- 昵称注册，Token 认证（自动持久化）
-- 每人唯一邀请码，好友通过邀请码互加
+- **语音控制**：按住说话，Web Speech API 转文字后加密发送
+- **终端流式渲染**：Claude Code 的思考、工具调用、输出实时展示
+- **上下文连续**：`--resume` 自动追踪 session，不丢失对话上下文
+- **多设备**：多台手机可同时连接（Owner + Observer 模式）
+- **Mac 睡眠恢复**：CLI 断线后手机自动重连，无需重新配对
 
-**IM 聊天**
-- 1v1 私聊（DM）、群聊、AI 对话三种会话类型
-- @Claude 或 @claude 在任何会话中唤起 AI 助手
-- 实时消息推送（WebSocket 多端同步）
-- 消息搜索、收藏（星标）
-
-**语音控制**
-- 按住说话（Web Speech API 语音转文字）
-- 文字输入（Enter 发送）
-- 流式显示 Claude Code 执行结果
-
-**PWA 体验**
-- 添加到主屏幕，类原生体验
-- 新消息 Notification 推送
-- 深色主题，iOS Safe Area 适配
-- 中英双语切换
-
-**外网穿透**
-- Cloudflare Tunnel 一键启动（`start-tunnel.sh`）
-- 免费随机子域名，自带 HTTPS
-- 无需域名、无需 Cloudflare 账号
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `PORT` | `3456` | 服务端口 |
-| `BRIDGE_MODE` | `mock` | 桥接模式: `mock` / `cli` / `management-api` |
-| `CC_PROJECT` | `main` | cc-connect 项目名 |
-| `CC_API_BASE` | `http://localhost:8080` | Management API 地址 |
-
-## 项目结构
+## CLI 参数
 
 ```
-cc-voice/
-├── server.js          # 后端：Express + WebSocket + SQLite + 用户系统 + 桥接
-├── public/
-│   ├── index.html     # PWA 入口（登录 + 主界面）
-│   ├── app.js         # 前端逻辑 (vanilla JS, 用户/好友/IM/语音)
-│   ├── style.css      # 样式（深色主题）
-│   ├── manifest.json  # PWA manifest
-│   ├── sw.js          # Service Worker
-│   └── icons/         # PWA 图标
-├── start-tunnel.sh    # Cloudflare Tunnel 一键启动
-├── setup-https.sh     # 局域网 HTTPS 证书配置
-├── package.json
-├── LICENSE            # MIT
-└── README.md
+ccvoice [选项]
+
+选项:
+  --relay URL       自定义 relay 地址（默认 https://ccvoice.app）
+  --model MODEL     Claude 模型（默认跟随 claude 设置）
+  --cwd DIR         Claude 工作目录（默认当前目录）
 ```
 
-## 数据存储
+环境变量: `RELAY_URL`, `CLAUDE_MODEL`, `CLAUDE_CWD`
 
-SQLite 数据库保存在 `data/cc-voice.db`（已 gitignore），包含：
+## 自托管 Relay
 
-- `users` — 用户信息、Token、邀请码
-- `friends` — 好友关系（双向）
-- `conversations` — 会话（ai / dm / group）
-- `conv_members` — 会话成员
-- `messages` — 消息记录（含发送者、星标状态）
+Relay 是一个 Cloudflare Worker，可以自部署：
+
+```bash
+cd relay
+npm install
+npx wrangler deploy
+```
+
+然后 CLI 指定你的 relay：
+
+```bash
+ccvoice --relay https://your-worker.your-account.workers.dev
+```
 
 ## 技术栈
 
-- 后端: Node.js + Express + ws + better-sqlite3
-- 前端: Vanilla JS (零依赖)
-- 语音: Web Speech API (webkitSpeechRecognition)
-- 通信: WebSocket (实时) + REST API
-- 存储: SQLite (WAL mode)
-- 桥接: cc-connect (CLI / Management API)
-- 穿透: Cloudflare Tunnel (trycloudflare.com)
+- CLI: Node.js + `node:crypto` (X25519 + AES-256-GCM)
+- 前端: Vanilla JS + Web Crypto API
+- Relay: Cloudflare Workers + Durable Objects
+- 语音: Web Speech API
+- 协议: WebSocket + JSON (加密层)
+
+## 依赖
+
+运行时仅需 2 个依赖：
+
+- `ws` — WebSocket 客户端
+- `qrcode-terminal` — 终端 QR 码显示
 
 ## License
 

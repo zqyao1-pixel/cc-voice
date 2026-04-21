@@ -20,6 +20,12 @@
     "better-sqlite3": "^11.7.0",
     "express": "^4.21.0"
   },
+  "files": [
+    "bin/",
+    "public/v3/",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=18.0.0"
   },
