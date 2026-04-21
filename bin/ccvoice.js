@@ -78,16 +78,21 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const E2E = {
   generateKeyPair() {
     const keyPair = crypto.generateKeyPairSync('x25519');
+    // 导出 raw 格式公钥 (32 bytes)，与 Web Crypto API 兼容
+    const publicKeyRaw = keyPair.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32);
     return {
-      publicKey: keyPair.publicKey.export({ type: 'spki', format: 'der' }),
+      publicKey: publicKeyRaw,
       privateKey: keyPair.privateKey,
-      publicKeyObj: keyPair.publicKey,
     };
   },
 
-  deriveSharedSecret(privateKey, peerPublicKeyDer) {
+  deriveSharedSecret(privateKey, peerPublicKeyRaw) {
+    // 从 raw 32 bytes 构造 X25519 公钥
+    // X25519 SPKI DER = 固定 12 字节头 + 32 字节 raw key
+    const spkiHeader = Buffer.from('302a300506032b656e032100', 'hex');
+    const spkiDer = Buffer.concat([spkiHeader, Buffer.from(peerPublicKeyRaw)]);
     const peerPubKey = crypto.createPublicKey({
-      key: Buffer.from(peerPublicKeyDer),
+      key: spkiDer,
       type: 'spki',
       format: 'der',
     });
@@ -107,13 +112,17 @@ const E2E = {
     const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, nonce);
     const encrypted = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
     const tag = cipher.getAuthTag();
-    return { nonce: nonce.toString('base64'), ciphertext: encrypted.toString('base64'), tag: tag.toString('base64') };
+    // Web Crypto 兼容：tag 追加到 ciphertext 尾部
+    const combined = Buffer.concat([encrypted, tag]);
+    return { nonce: nonce.toString('base64'), ciphertext: combined.toString('base64') };
   },
 
   decrypt(encrypted, aesKey) {
     const nonce = Buffer.from(encrypted.nonce, 'base64');
-    const ciphertext = Buffer.from(encrypted.ciphertext, 'base64');
-    const tag = Buffer.from(encrypted.tag, 'base64');
+    const combined = Buffer.from(encrypted.ciphertext, 'base64');
+    // Web Crypto 兼容：tag 是最后 16 字节
+    const ciphertext = combined.subarray(0, -16);
+    const tag = combined.subarray(-16);
     const decipher = crypto.createDecipheriv('aes-256-gcm', aesKey, nonce);
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf-8');
