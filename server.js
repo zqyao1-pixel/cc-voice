@@ -109,6 +109,15 @@ try {
   // 新插入的 suggestion 消息会通过 JS 端控制
 } catch (e) { console.error('[migrate]', e.message); }
 
+// ─── v3 迁移: conversations 增加 claude_session_id ──────
+try {
+  const convCols = db.prepare("PRAGMA table_info(conversations)").all().map(c => c.name);
+  if (!convCols.includes('claude_session_id')) {
+    db.exec("ALTER TABLE conversations ADD COLUMN claude_session_id TEXT DEFAULT NULL");
+    console.log('[migrate] conversations.claude_session_id column added');
+  }
+} catch (e) { console.error('[migrate v3]', e.message); }
+
 // ─── 预编译 SQL ─────────────────────────────────────────
 const stmts = {
   // 用户
@@ -132,6 +141,7 @@ const stmts = {
   togglePin: db.prepare('UPDATE conversations SET pinned = CASE WHEN pinned=1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ?'),
   deleteConv: db.prepare('DELETE FROM conversations WHERE id = ?'),
   getConv: db.prepare('SELECT * FROM conversations WHERE id = ?'),
+  setConvSessionId: db.prepare('UPDATE conversations SET claude_session_id = ? WHERE id = ?'),
   // 获取用户的所有会话（通过 conv_members）
   listUserConvs: db.prepare(`
     SELECT c.*, (SELECT COUNT(*) FROM messages WHERE conv_id = c.id) as msg_count
@@ -458,10 +468,10 @@ if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
 }
 
 // ─── cc-connect 桥接层 ─────────────────────────────────
-async function sendToCCConnect(text, onChunk, onStatus) {
+async function sendToCCConnect(text, onChunk, onStatus, convId) {
   switch (BRIDGE_MODE) {
     case 'management-api': return bridgeManagementAPI(text, onChunk, onStatus);
-    case 'cli': return bridgeCLI(text, onChunk, onStatus);
+    case 'cli': return bridgeCLI(text, onChunk, onStatus, convId);
     default: return bridgeMock(text, onChunk, onStatus);
   }
 }
@@ -500,9 +510,17 @@ function makeStreamExtractor() {
   };
 }
 
-function bridgeCLI(text, onChunk, onStatus) {
+function bridgeCLI(text, onChunk, onStatus, convId) {
   return new Promise((resolve, reject) => {
     onStatus('thinking');
+
+    // 查找该对话绑定的 Claude session ID（实现跨消息上下文连续）
+    let sessionId = null;
+    if (convId) {
+      const conv = stmts.getConv.get(convId);
+      sessionId = conv?.claude_session_id || null;
+    }
+
     const args = [
       '-p',
       '--verbose',
@@ -510,16 +528,26 @@ function bridgeCLI(text, onChunk, onStatus) {
       '--include-partial-messages',
       '--model', CLAUDE_MODEL,
       '--permission-mode', CLAUDE_PERMISSION_MODE,
-      '-',  // 从 stdin 读取 prompt
     ];
+
+    // 有 session ID 就 resume，否则新建会话
+    if (sessionId) {
+      args.push('--resume', sessionId);
+      console.log(`  [claude-cli] RESUME session=${sessionId}, prompt length=${text.length}`);
+    } else {
+      console.log(`  [claude-cli] NEW session, prompt length=${text.length}`);
+    }
+
+    args.push('-');  // 从 stdin 读取 prompt
+
     const child = spawn(CLAUDE_BIN, args, { cwd: CLAUDE_CWD });
-    // 通过 stdin 传 prompt（避免参数过长）
     child.stdin.write(text);
     child.stdin.end();
     const extract = makeStreamExtractor();
     let full = '';
     let buf = '';
     let executingSent = false;
+    let capturedSessionId = null;
 
     child.stdout.on('data', d => {
       buf += d.toString();
@@ -531,6 +559,16 @@ function bridgeCLI(text, onChunk, onStatus) {
         if (!line) continue;
         let evt;
         try { evt = JSON.parse(line); } catch (e) { continue; } // 非 JSON 行忽略
+
+        // 捕获 session ID（从 init 事件或 result 事件中提取）
+        if (evt.type === 'system' && evt.subtype === 'init' && evt.session_id) {
+          capturedSessionId = evt.session_id;
+          console.log(`  [claude-cli] captured session_id=${capturedSessionId}`);
+        }
+        if (evt.session_id && !capturedSessionId) {
+          capturedSessionId = evt.session_id;
+        }
+
         // 状态转换
         if (evt.type === 'system' && evt.subtype === 'init' && !executingSent) {
           onStatus('executing'); executingSent = true;
@@ -551,6 +589,13 @@ function bridgeCLI(text, onChunk, onStatus) {
 
     child.stderr.on('data', d => console.error('[claude]', d.toString()));
     child.on('close', code => {
+      // 保存 session ID 到对话（无论新建还是 resume 都更新）
+      if (capturedSessionId && convId) {
+        try {
+          stmts.setConvSessionId.run(capturedSessionId, convId);
+          console.log(`  [claude-cli] saved session_id=${capturedSessionId} for conv=${convId}`);
+        } catch (e) { console.error('[claude-cli] save session_id error:', e.message); }
+      }
       if (code === 0) { onStatus('done'); resolve(full); }
       else { onStatus('error'); reject(new Error(`claude exit ${code}`)); }
     });
@@ -946,24 +991,12 @@ wss.on('connection', (ws, req) => {
 
       if (needClaude) {
         // 去掉 @claude 前缀
-        const currentMsg = text.replace(/@[Cc]laude\s*/g, '').trim() || text;
+        const prompt = text.replace(/@[Cc]laude\s*/g, '').trim() || text;
 
-        // 拼接历史上下文（最近 20 条 user/assistant 消息）
-        const history = stmts.getMessages.all(convId)
-          .filter(m => m.role === 'user' || m.role === 'assistant')
-          .slice(-20); // 最多 20 条
-
-        let prompt;
-        if (history.length > 1) {
-          // 有历史：把对话记录 + 当前消息拼成一个带上下文的 prompt
-          const ctx = history.slice(0, -1).map(m => {
-            const role = m.role === 'assistant' ? 'Assistant' : 'Human';
-            return `${role}: ${m.content}`;
-          }).join('\n\n');
-          prompt = `以下是之前的对话记录，请基于上下文继续：\n\n${ctx}\n\nHuman: ${currentMsg}\n\n请回答最新的问题。`;
-        } else {
-          prompt = currentMsg;
-        }
+        // v3: 使用 --resume 实现原生上下文连续（不再手动拼接历史）
+        // session ID 由 bridgeCLI 自动管理：首次新建，后续 resume
+        const hasSession = !!conv.claude_session_id;
+        console.log(`  [context] convId=${convId}, session=${conv.claude_session_id || 'NEW'}, prompt="${prompt.substring(0, 80)}"`);
 
         const aRes = stmts.insertMsg.run(convId, null, 'assistant', '', 'thinking', Date.now());
         const aMsgId = aRes.lastInsertRowid;
@@ -982,6 +1015,7 @@ wss.on('connection', (ws, req) => {
             (status) => {
               if (status !== 'thinking') sendToConvMembers(convId, statusMsg(status), null);
             },
+            convId,  // v3: 传 convId 给 bridgeCLI 以管理 session
           );
           stmts.updateMsg.run(fullContent, 'done', aMsgId);
           stmts.updateConvTime.run(Date.now(), convId);

@@ -243,8 +243,18 @@ function connectRelayUpstream(port, code) {
 // 桥接：relay ↔ 本地 WS server
 let localWs = null;
 
+let relayMsgHandler = null;
+
 function bridgeLocalWs(port) {
-  if (localWs && localWs.readyState <= 1) return; // 已连接或连接中
+  // 清理旧连接
+  if (localWs) {
+    try { localWs.removeAllListeners(); localWs.close(); } catch {}
+    localWs = null;
+  }
+  // 清理旧的 relay message handler（防止重复绑定）
+  if (relayMsgHandler && relayWs) {
+    try { relayWs.removeListener('message', relayMsgHandler); } catch {}
+  }
 
   localWs = new WebSocket(`ws://localhost:${port}`);
 
@@ -260,9 +270,8 @@ function bridgeLocalWs(port) {
   });
 
   // relay → 本地（来自手机的消息）
-  relayWs.on('message', (data) => {
+  relayMsgHandler = (data) => {
     const msg = data.toString();
-    // 过滤 relay 系统消息
     try {
       const parsed = JSON.parse(msg);
       if (parsed.type?.startsWith('relay:')) {
@@ -271,21 +280,25 @@ function bridgeLocalWs(port) {
         } else if (parsed.type === 'relay:peer_disconnected' && parsed.role === 'downstream') {
           console.log('  📱 手机已断开\n');
         }
-        return; // 不转发 relay 系统消息到本地
+        return;
       }
     } catch {}
 
     if (localWs?.readyState === WebSocket.OPEN) {
       localWs.send(msg);
+    } else {
+      console.log('  ⚠️  本地 WS 未就绪，丢弃消息');
+      bridgeLocalWs(port); // 尝试重建
     }
-  });
+  };
+  relayWs.on('message', relayMsgHandler);
 
   localWs.on('close', () => {
     console.log('  ⚠️  本地 WS 断开，2s 后重连...');
     setTimeout(() => bridgeLocalWs(port), 2000);
   });
 
-  localWs.on('error', () => {}); // onclose 会处理
+  localWs.on('error', () => {});
 }
 
 function printRelayInfo(code) {

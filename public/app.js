@@ -223,7 +223,7 @@ function render() {
       hint = document.createElement('div');
       hint.id = 'roleHint';
       hint.className = 'role-hint observer';
-      document.querySelector('.input-bar')?.parentElement?.insertBefore(hint, document.querySelector('.input-bar'));
+      document.querySelector('.input-area')?.parentElement?.insertBefore(hint, document.querySelector('.input-area'));
     }
     hint.textContent = l.observerHint;
     hint.style.display = 'block';
@@ -239,7 +239,7 @@ function render() {
       execBtn.id = 'executeBtn';
       execBtn.className = 'execute-btn';
       execBtn.onclick = distillAndExecute;
-      document.querySelector('.input-bar')?.appendChild(execBtn);
+      document.querySelector('.input-row')?.appendChild(execBtn);
     }
     execBtn.textContent = l.execute;
     execBtn.style.display = 'inline-block';
@@ -554,27 +554,49 @@ function connectWS() {
 
 function scheduleReconnect() {
   clearTimeout(state.reconnectTimer);
+  state.reconnectRetry = (state.reconnectRetry || 0) + 1;
+  const delay = Math.min(state.reconnectRetry * 2000, 15000); // 2s, 4s, 6s, ... 最多 15s
+  console.log(`[reconnect] ${delay/1000}s 后重连 (第 ${state.reconnectRetry} 次)...`);
   state.reconnectTimer = setTimeout(() => {
     if (APP_MODE === 'relay') {
       // Relay 模式：用保存的配对码自动重连
       connectWSAsync().then(() => {
         if (state.token && state.ws?.readyState === WebSocket.OPEN) {
           state.ws.send(JSON.stringify({ type: 'auth', token: state.token }));
+          state.reconnectRetry = 0; // 连上了就重置
+          state.authRetry = 0;
         }
-      });
+      }).catch(() => scheduleReconnect());
     } else {
       connectWS();
+      state.reconnectRetry = 0;
     }
-  }, 3000);
+  }, delay);
 }
 
 function handleWS(data) {
   switch (data.type) {
     case 'welcome': state.bridgeMode = data.bridge; break;
     case 'auth_ok':
+      state.authRetry = 0; state.reconnectRetry = 0;
       if (data.onlineFriends) state.onlineFriends = new Set(data.onlineFriends);
       break;
-    case 'auth_fail': state.user = null; state.token = null; localStorage.removeItem('cc-voice-token'); render(); break;
+    case 'auth_fail':
+      if (APP_MODE === 'relay') {
+        // Relay 模式：auth_fail 可能是 upstream 暂时不可用（如 Mac 合盖），不要立刻清 token
+        state.authRetry = (state.authRetry || 0) + 1;
+        if (state.authRetry > 5) {
+          // 连续 5 次失败才真正退出
+          state.authRetry = 0;
+          state.user = null; state.token = null; localStorage.removeItem('cc-voice-token'); render();
+        } else {
+          console.log(`[auth_fail] relay 模式重试 (${state.authRetry}/5)...`);
+          scheduleReconnect();
+        }
+      } else {
+        state.user = null; state.token = null; localStorage.removeItem('cc-voice-token'); render();
+      }
+      break;
 
     case 'presence':
       if (data.online) state.onlineFriends.add(data.userId);
@@ -656,11 +678,17 @@ async function distillAndExecute() {
   showDistillPanel(l.distilling, true);
 
   try {
-    const res = await fetch('/api/distill', {
-      method: 'POST', headers: headers(),
-      body: JSON.stringify({ convId: state.currentConvId, limit: 30 }),
-    });
-    const data = await res.json();
+    let data;
+    if (APP_MODE === 'relay') {
+      // Relay 模式：通过 WS RPC 转发给本地 server
+      data = await wsRPC('POST', '/api/distill', { convId: state.currentConvId, limit: 30 });
+    } else {
+      const res = await fetch('/api/distill', {
+        method: 'POST', headers: headers(),
+        body: JSON.stringify({ convId: state.currentConvId, limit: 30 }),
+      });
+      data = await res.json();
+    }
     if (data.draft) {
       showDistillPanel(data.draft, false);
     } else {
@@ -678,7 +706,7 @@ function showDistillPanel(content, loading) {
     panel = document.createElement('div');
     panel.id = 'distillPanel';
     panel.className = 'distill-panel';
-    document.querySelector('.input-bar')?.parentElement?.insertBefore(panel, document.querySelector('.input-bar'));
+    document.querySelector('.input-area')?.parentElement?.insertBefore(panel, document.querySelector('.input-area'));
   }
   const l = t();
   if (loading) {

@@ -1,27 +1,32 @@
 {
-  "name": "cc-voice",
-  "version": "2.0.0",
-  "description": "手机遥控你的 Claude Code / Voice control your Claude Code from phone",
+  "name": "ccvoice",
+  "version": "3.0.0",
+  "description": "手机遥控你的 Claude Code — E2E 加密 + 多人协作 / Remote control Claude Code from your phone",
   "main": "server.js",
   "bin": {
+    "ccvoice": "./bin/ccvoice.js",
     "cc-voice": "./bin/cli.js"
   },
   "scripts": {
-    "start": "node server.js",
-    "dev": "BRIDGE_MODE=mock node server.js",
-    "cli": "BRIDGE_MODE=cli node server.js",
-    "setup-https": "mkcert -install && mkcert localhost 127.0.0.1 ::1 && mv localhost+2.pem certs/server.pem && mv localhost+2-key.pem certs/server-key.pem",
-    "gen-icons": "node scripts/gen-icons.js"
+    "start": "node bin/ccvoice.js",
+    "start:legacy": "BRIDGE_MODE=cli node server.js",
+    "dev": "BRIDGE_MODE=mock node server.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
-    "express": "^4.21.0",
     "qrcode-terminal": "^0.12.0",
     "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "keywords": ["claude-code", "voice", "pwa", "remote-control", "ai"],
-  "license": "MIT"
+  "keywords": ["claude-code", "voice", "mobile", "remote-control", "ai", "e2e-encryption", "collaboration"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zqyao1-pixel/cc-voice"
+  }
 }
