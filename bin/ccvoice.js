@@ -42,6 +42,7 @@ const claudeArgs = []; // 透传给 claude 的参数
 for (const a of args) {
   if (a === '--local') flags.local = true;
   else if (a === '--help' || a === '-h') flags.help = true;
+  else if (a === '--unsafe') flags.unsafe = true;
   else if (a.startsWith('--project=')) flags.project = a.split('=').slice(1).join('=');
   else if (a.startsWith('--relay=')) flags.relay = a.split('=').slice(1).join('=');
   else if (a.startsWith('--model=')) flags.model = a.split('=').slice(1).join('=');
@@ -59,6 +60,7 @@ if (flags.help) {
     ccvoice --project=~/myapp     指定项目目录
     ccvoice --model=opus          指定 Claude 模型
     ccvoice --relay=wss://...     自定义 relay 地址
+    ccvoice --unsafe              允许 owner 跳过 Claude 工具批准（默认关闭）
     ccvoice [claude args...]      其余参数透传给 claude
 
   环境变量:
@@ -72,6 +74,9 @@ const RELAY_URL = flags.relay || process.env.RELAY_URL || 'https://ccvoice.app';
 const CLAUDE_CWD = flags.project || process.env.CLAUDE_CWD || process.cwd();
 const CLAUDE_MODEL = flags.model || process.env.CLAUDE_MODEL || 'sonnet';
 const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
+const PERMISSION_MODE = flags.unsafe
+  ? 'bypassPermissions'
+  : (process.env.CLAUDE_PERMISSION_MODE || 'default');
 
 // ─── 加密模块 ──────────────────────────────────────────
 // X25519 ECDH + AES-256-GCM
@@ -165,7 +170,7 @@ function sendToClaude(text) {
     '--verbose',
     '--output-format', 'stream-json',
     '--model', CLAUDE_MODEL,
-    '--permission-mode', process.env.CLAUDE_PERMISSION_MODE || 'bypassPermissions',
+    '--permission-mode', PERMISSION_MODE,
   ];
 
   // 有 session ID → resume（上下文连续）
@@ -733,6 +738,13 @@ async function main() {
 
   console.log(`  📂 项目目录: ${CLAUDE_CWD}`);
   console.log(`  🤖 模型: ${CLAUDE_MODEL}`);
+  console.log(`  🔒 权限模式: ${PERMISSION_MODE}`);
+  if (PERMISSION_MODE === 'bypassPermissions') {
+    console.log('');
+    console.log('  \x1b[1;31m⚠️  危险: bypassPermissions 已启用\x1b[0m');
+    console.log('  \x1b[1;31m   任何配对成功的 owner 可在本机执行任意命令、读写任意文件。\x1b[0m');
+    console.log('  \x1b[1;31m   仅在你完全信任配对码的传递路径时使用。\x1b[0m');
+  }
   console.log('');
 
   // 连 relay（非阻塞）
