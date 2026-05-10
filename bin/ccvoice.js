@@ -160,6 +160,10 @@ let groupKey = null;     // 群组加密密钥 (多人场景)
 // 待处理建议 (id → { id, text, from, nickname, status, createdAt })
 const pendingSuggestions = new Map();
 
+// C2: Owner 配对窗口 — CLI 启动后 N 秒内必须完成首次 owner 配对,否则拒绝新 peerId
+const OWNER_PAIRING_WINDOW_MS = 60_000;
+const cliStartTime = Date.now();
+
 // ─── Claude Code 调用 (每条消息一次 claude -p --resume) ─
 function sendToClaude(text) {
   if (claudeBusy) {
@@ -497,7 +501,8 @@ async function connectRelay() {
     relayWs = new WebSocket(url);
 
     relayWs.on('open', () => {
-      console.log('  ✅ Relay 已连接\n');
+      console.log('  ✅ Relay 已连接');
+      console.log(`  ⏱  Owner 配对窗口: ${OWNER_PAIRING_WINDOW_MS/1000} 秒（超过则需重启 ccvoice）\n`);
 
       // 心跳
       clearInterval(pingTimer);
@@ -583,7 +588,18 @@ function handleRelayMessage(msg) {
         assignedRole = existing.role;
       } else {
         const ownerExists = [...peers.values()].some(p => p.role === 'owner');
-        assignedRole = ownerExists ? 'observer' : 'owner';
+        if (!ownerExists) {
+          // C2: 全新 peerId + 当前无 owner → 必须在 OWNER_PAIRING_WINDOW_MS 内
+          const elapsed = Date.now() - cliStartTime;
+          if (elapsed > OWNER_PAIRING_WINDOW_MS) {
+            console.log(`  🚫 拒绝 handshake: owner 配对窗口已过 (${Math.round(elapsed/1000)}s > ${OWNER_PAIRING_WINDOW_MS/1000}s)`);
+            console.log(`     重启 ccvoice 重新开放窗口`);
+            return;
+          }
+          assignedRole = 'owner';
+        } else {
+          assignedRole = 'observer';
+        }
       }
 
       peers.set(peerId, {
