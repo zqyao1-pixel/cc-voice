@@ -16,6 +16,8 @@ ccvoice
 
 手机扫码或访问 [ccvoice.app](https://ccvoice.app)，输入配对码即可连接。
 
+> 如果创建了 `.env`（自托管 relay / 自定义工作目录），请先 `chmod 600 .env` 防止本机其他进程读取。仓库内 `.env.example` 是模板。
+
 ## 工作原理
 
 ```

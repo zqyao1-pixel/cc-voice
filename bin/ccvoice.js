@@ -22,6 +22,13 @@ const WebSocket = require('ws');
 const projectRoot = path.join(__dirname, '..');
 const envPath = path.join(projectRoot, '.env');
 if (fs.existsSync(envPath)) {
+  try {
+    const mode = fs.statSync(envPath).mode & 0o777;
+    if (mode & 0o077) {
+      console.log(`  \x1b[1;33m⚠️  ${envPath} 权限 ${mode.toString(8)} 太宽，建议 chmod 600\x1b[0m`);
+    }
+  } catch {}
+
   for (const line of fs.readFileSync(envPath, 'utf-8').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
