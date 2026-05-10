@@ -101,17 +101,12 @@ export class RelayRoom extends DurableObject {
         try { target.send(message); } catch {}
       }
     } else if (senderRole === 'downstream') {
-      // downstream → 只发给 upstream
+      // downstream → 只发给 upstream(CLI)。CLI 负责把可见消息广播回所有
+      // downstream(user_input echo / suggestion_broadcast / participants 等)。
+      // 之前这里有 downstream→downstream 直发,会和 CLI 的 broadcast 重复
+      // 导致同一条消息出现两次。Phase-fix: 删除直发,统一走 CLI。
       for (const target of this.ctx.getWebSockets('upstream')) {
         try { target.send(message); } catch {}
-      }
-      // 同时广播给其他 downstream（让 observer 看到 owner 的操作）
-      const senderPeerId = tags[1];
-      for (const target of this.ctx.getWebSockets('downstream')) {
-        const targetTags = this.ctx.getTags(target);
-        if (targetTags && targetTags[1] !== senderPeerId) {
-          try { target.send(message); } catch {}
-        }
       }
     }
   }
@@ -173,20 +168,65 @@ export default {
       );
     }
 
-    // API: 房间状态
+    // API: 创建邀请码 (CLI 在 owner 配对成功后调用)
+    // 邀请码 ≠ 配对码:配对码用于 owner 首次配对 CLI,邀请码用于 owner
+    // 邀请其他设备(observer)。两者都通过 KV 映射到同一个 room。
+    if (url.pathname === '/api/relay/create-invite' && request.method === 'POST') {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return Response.json({ error: 'Invalid JSON' }, { status: 400, headers: corsHeaders });
+      }
+      const roomCode = (body.roomCode || '').toUpperCase();
+      if (!roomCode) {
+        return Response.json({ error: 'Missing roomCode' }, { status: 400, headers: corsHeaders });
+      }
+      // 验证 room 有 upstream 在线 (避免给死 room 创建别名)
+      const id = env.RELAY_ROOM.idFromName(roomCode);
+      const room = env.RELAY_ROOM.get(id);
+      const status = await room.fetch(new Request('https://internal/status'));
+      const statusData = await status.json();
+      if (!statusData.hasUpstream) {
+        return Response.json(
+          { error: 'Room not found or no upstream' },
+          { status: 404, headers: corsHeaders },
+        );
+      }
+      // 生成不与房间码碰撞的邀请码
+      let inviteCode;
+      do {
+        inviteCode = generateCode();
+      } while (inviteCode === roomCode);
+      // KV: invite_code → room_code, TTL 24h
+      if (env.CODE_MAP) {
+        await env.CODE_MAP.put(inviteCode, roomCode, { expirationTtl: 86400 });
+      }
+      return Response.json(
+        { inviteCode, roomCode },
+        { headers: corsHeaders },
+      );
+    }
+
+    // API: 房间状态 — 接受 room_code 或 invite_code
     if (url.pathname === '/api/relay/status' && request.method === 'GET') {
       const code = url.searchParams.get('code');
       if (!code) {
         return Response.json({ error: 'Missing code' }, { status: 400, headers: corsHeaders });
       }
-      const id = env.RELAY_ROOM.idFromName(code.toUpperCase());
+      let resolved = code.toUpperCase();
+      if (env.CODE_MAP) {
+        const mapped = await env.CODE_MAP.get(resolved);
+        if (mapped) resolved = mapped;
+      }
+      const id = env.RELAY_ROOM.idFromName(resolved);
       const room = env.RELAY_ROOM.get(id);
       const status = await room.fetch(new Request('https://internal/status'));
       const data = await status.json();
-      return Response.json({ code: code.toUpperCase(), ...data }, { headers: corsHeaders });
+      return Response.json({ code: resolved, ...data }, { headers: corsHeaders });
     }
 
-    // WebSocket: 加入房间
+    // WebSocket: 加入房间 — 接受 room_code 或 invite_code
     if (url.pathname === '/relay') {
       const code = url.searchParams.get('code');
       const role = url.searchParams.get('role');
@@ -198,7 +238,13 @@ export default {
         return new Response('role must be upstream or downstream', { status: 400 });
       }
 
-      const id = env.RELAY_ROOM.idFromName(code.toUpperCase());
+      // 先查 KV 看是不是 invite_code 别名;是则解析回原始 room_code
+      let resolved = code.toUpperCase();
+      if (env.CODE_MAP) {
+        const mapped = await env.CODE_MAP.get(resolved);
+        if (mapped) resolved = mapped;
+      }
+      const id = env.RELAY_ROOM.idFromName(resolved);
       const room = env.RELAY_ROOM.get(id);
       return room.fetch(request);
     }

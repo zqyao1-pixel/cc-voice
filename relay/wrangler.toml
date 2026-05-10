@@ -19,6 +19,13 @@ class_name = "RelayRoom"
 tag = "v1"
 new_sqlite_classes = ["RelayRoom"]
 
+# KV namespace: invite_code → room_code 映射 (TTL 24h)
+# 创建命令: npx wrangler kv namespace create CODE_MAP
+# 创建后把输出的 id 填到下面的 id 字段
+[[kv_namespaces]]
+binding = "CODE_MAP"
+id = "b2a038c39d64475ead11e5de0e87ab28"
+
 # 自定义域名绑定（ccvoice.app）
 # 需要在 Cloudflare Dashboard 里把 ccvoice.app 指向这个 Worker
 # [routes]

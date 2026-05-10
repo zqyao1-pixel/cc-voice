@@ -19,10 +19,14 @@ const E2E = {
   },
 
   async deriveSharedSecret(privateKey, peerPublicKeyRaw) {
+    // X25519 spec: public keys MUST be imported with empty usages.
+    // Only the private key gets the 'deriveBits' / 'deriveKey' usage.
+    // Chrome started enforcing this strictly — passing ['deriveBits'] here
+    // throws "Cannot create a key using the specified key usages." (M120+).
     const peerPubKey = await crypto.subtle.importKey(
       'raw', peerPublicKeyRaw,
       { name: 'X25519' },
-      false, ['deriveBits']
+      false, []
     );
     const bits = await crypto.subtle.deriveBits(
       { name: 'X25519', public: peerPubKey },
@@ -69,10 +73,12 @@ const state = {
   relayCode: null,
   relayUrl: null,
   peerId: crypto.randomUUID().slice(0, 8),
-  role: 'owner',        // 从 localStorage 或配对参数决定
+  role: 'owner',        // 由 CLI 在 ack 中权威分配
+  nickname: localStorage.getItem('ccvoice-nickname') || '',
   keyPair: null,
   aesKey: null,          // 与 CLI 的共享密钥
   groupKey: null,        // 多人场景下的群组密钥
+  inviteCode: null,      // owner 配对成功后 CLI 发来的邀请码
   connected: false,
   encrypted: false,
   claudeStatus: 'idle',  // idle | thinking | executing | done | error
@@ -84,13 +90,19 @@ const state = {
 
 // ─── 配对 ──────────────────────────────────────────────
 function initPairScreen() {
-  // 检查 URL hash 或 localStorage 中的配对码
+  // 回填昵称
+  const savedNick = localStorage.getItem('ccvoice-nickname');
+  if (savedNick && $('nicknameInput')) $('nicknameInput').value = savedNick;
+
+  // URL hash 自动填配对码
   const hash = location.hash;
   if (hash.startsWith('#pair=')) {
     const code = hash.slice(6).toUpperCase();
     $('pairInput').value = code;
-    // 自动连接
-    setTimeout(() => startPairing(code), 300);
+    // 如果昵称已存在,自动连;否则让用户先填昵称
+    if (savedNick) {
+      setTimeout(() => startPairing(code), 300);
+    }
   }
 
   const saved = localStorage.getItem('ccvoice-code');
@@ -102,17 +114,31 @@ function initPairScreen() {
   $('pairInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') $('pairBtn').click();
   });
-  // 自动大写
+  // 配对码自动大写;昵称不强制
   $('pairInput').addEventListener('input', () => {
     $('pairInput').value = $('pairInput').value.toUpperCase();
   });
+  if ($('nicknameInput')) {
+    $('nicknameInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('pairBtn').click();
+    });
+  }
 }
 
 async function startPairing(code) {
   if (!code || code.length < 4) {
-    $('pairError').textContent = '请输入有效配对码';
+    $('pairError').textContent = '请输入有效配对码或邀请码';
     return;
   }
+  const nicknameInput = $('nicknameInput');
+  const nickname = (nicknameInput?.value || '').trim();
+  if (!nickname) {
+    $('pairError').textContent = '请输入昵称';
+    nicknameInput?.focus();
+    return;
+  }
+  state.nickname = nickname;
+  localStorage.setItem('ccvoice-nickname', nickname);
 
   $('pairBtn').disabled = true;
   $('pairBtn').textContent = '连接中...';
@@ -166,13 +192,14 @@ async function connectRelay(code) {
       state.reconnectRetry = 0;
       console.log('[relay] connected');
 
-      // 发送配对握手（包含公钥）
+      // 发送配对握手（包含公钥 + 昵称）
       const pubKeyBase64 = btoa(String.fromCharCode(...state.keyPair.publicKeyRaw));
       state.ws.send(JSON.stringify({
         type: 'pair_handshake',
         publicKey: pubKeyBase64,
         peerId: state.peerId,
         role: state.role,
+        nickname: state.nickname,
       }));
 
       resolve();
@@ -198,12 +225,8 @@ async function handleRelayMessage(raw) {
 
   // Relay 控制消息
   if (msg.type?.startsWith('relay:')) {
-    if (msg.type === 'relay:peer_connected') {
-      addSystemEvent(`${msg.role} 已连接`);
-      if (msg.totalDownstreams) updateParticipants();
-    } else if (msg.type === 'relay:peer_disconnected') {
-      addSystemEvent(`${msg.role} 已断开`);
-    } else if (msg.type === 'relay:upstream_gone') {
+    // Phase 4 静音 — 参与者列表已在 header 渲染,peer 连接事件不再写入终端流。
+    if (msg.type === 'relay:upstream_gone') {
       addSystemEvent('⚠️ 电脑端已断开，等待重连...');
       state.claudeStatus = 'idle';
       updateStatusUI();
@@ -219,11 +242,27 @@ async function handleRelayMessage(raw) {
       state.aesKey = await E2E.deriveAESKey(sharedSecret);
       state.encrypted = true;
 
+      // CLI 权威分配的角色 + 邀请码 (owner 配对成功后自动生成)
+      if (msg.role) state.role = msg.role;
+      if (msg.inviteCode) state.inviteCode = msg.inviteCode;
+
       // 切换到主界面
       $('pairScreen').style.display = 'none';
       $('mainScreen').style.display = 'flex';
       updateStatusUI();
       addSystemEvent('🔐 端到端加密已建立');
+
+      if (state.role === 'observer') {
+        const input = $('textInput');
+        if (input) input.placeholder = '输入建议… (Owner 审批后由 Claude 执行)';
+        addSystemEvent('👁 你是 Observer,输入将作为建议发给 Owner 审批');
+      } else {
+        addSystemEvent('👑 你是 Owner,输入直接交给 Claude 执行');
+        if (state.inviteCode) {
+          addSystemEvent(`🎟️ 邀请码: ${state.inviteCode} (分享给其他设备加入)`);
+        }
+      }
+
       $('textInput').focus();
     } catch (e) {
       console.error('Handshake failed:', e);
@@ -238,7 +277,7 @@ async function handleRelayMessage(raw) {
       const decrypted = await E2E.decrypt(msg.payload, state.aesKey);
       const gkBytes = Uint8Array.from(atob(decrypted), c => c.charCodeAt(0));
       state.groupKey = await crypto.subtle.importKey('raw', gkBytes, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
-      addSystemEvent('🔑 群组密钥已更新');
+      // Silent on success.
     } catch (e) {
       console.error('Group key error:', e);
     }
@@ -276,8 +315,27 @@ function handleDecryptedMessage(msg) {
     case 'session_info':
       $('headerMeta').textContent = `${msg.model || ''} · ${shortenPath(msg.cwd || '')}`;
       break;
+    case 'user_input':
+      // Owner 的输入由 CLI 广播回来 (relay 已不做 D2D 直发,统一走 CLI)。
+      // 自己发的不重复显示 — 本地 sendMessage 已经 addUserEvent。
+      if (msg.from === state.peerId) break;
+      addUserEvent(`${msg.nickname || (msg.from || '').substring(0, 4).toUpperCase()}: ${msg.text}`, 'owner');
+      break;
     case 'suggestion':
-      addSuggestionEvent(msg.from, msg.text);
+      // legacy raw suggestion echo — 已不通过 relay D2D 直发,基本不会到。
+      // 留个 fallback 用 nickname 显示。
+      addSuggestionEvent(msg.nickname || msg.from, msg.text);
+      break;
+    case 'suggestion_broadcast':
+      renderSuggestionBroadcast(msg);
+      break;
+    case 'invite_code':
+      state.inviteCode = msg.inviteCode;
+      addSystemEvent(`🎟️ 邀请码: ${msg.inviteCode}`);
+      break;
+    case 'participants':
+      state.participants = msg.participants || [];
+      renderParticipants();
       break;
     case 'local_input':
       addUserEvent(`[本地] ${msg.text}`, 'local');
@@ -293,6 +351,91 @@ function handleDecryptedMessage(msg) {
   }
 }
 
+// ─── Phase 3 多人协作 ─────────────────────────────────────
+
+function renderParticipants() {
+  // 复用 headerMeta 容器的右侧把参与者列表显示出来。如果有专门的
+  // participants 容器优先用它;否则用 header 的小字区域作 fallback。
+  let container = $('participantList');
+  if (!container) {
+    const meta = $('headerMeta');
+    if (!meta) return;
+    let tag = document.getElementById('participantTag');
+    if (!tag) {
+      tag = document.createElement('span');
+      tag.id = 'participantTag';
+      tag.style.marginLeft = '8px';
+      tag.style.opacity = '0.85';
+      meta.appendChild(tag);
+    }
+    container = tag;
+  }
+  const html = state.participants.map(p => {
+    const icon = p.role === 'upstream' ? '💻' : (p.role === 'owner' ? '👑' : '👁');
+    const name = escapeHtml(p.nickname || (p.id || '').substring(0, 4).toUpperCase() || 'CLI');
+    return `<span style="display:inline-flex;align-items:center;gap:3px;padding:2px 7px;margin-right:5px;border-radius:9px;font-size:11px;background:rgba(129,140,248,0.15);color:var(--accent,#818cf8);font-family:monospace">${icon} ${name}</span>`;
+  }).join('');
+  container.innerHTML = html;
+}
+
+function renderSuggestionBroadcast(msg) {
+  // 自己发的 pending 建议不重复显示 (本地 sendMessage 已 addUserEvent)
+  if (msg.from === state.peerId && msg.status === 'pending') return;
+
+  // 已存在则更新 status,否则新建
+  let el = document.querySelector(`[data-suggestion-id="${msg.id}"]`);
+  const isUpdate = !!el;
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'terminal-event suggestion';
+    el.dataset.suggestionId = msg.id;
+    $('terminal').appendChild(el);
+  }
+  const statusIcon = { pending: '⏳', approved: '✅', rejected: '🚫' }[msg.status] || '⏳';
+  const name = escapeHtml(msg.nickname || (msg.from || 'observer').substring(0, 8));
+  let html = `💡 <strong>${name}</strong> 建议: ${escapeHtml(msg.text || '')} <span style="opacity:0.7">${statusIcon} ${msg.status}</span>`;
+  if (state.role === 'owner' && msg.status === 'pending') {
+    html += ` <button onclick="approveSuggestion('${msg.id}')" style="margin-left:8px;background:#34d399;border:none;color:white;padding:2px 10px;border-radius:4px;cursor:pointer;font-size:12px">执行</button>`;
+    html += ` <button onclick="rejectSuggestion('${msg.id}')" style="margin-left:4px;background:rgba(255,255,255,0.15);border:none;color:white;padding:2px 10px;border-radius:4px;cursor:pointer;font-size:12px">忽略</button>`;
+  }
+  el.innerHTML = html;
+  if (!isUpdate) scrollToBottom();
+}
+
+async function approveSuggestion(id) {
+  if (!state.encrypted || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    const key = state.groupKey || state.aesKey;
+    const payload = await E2E.encrypt(
+      JSON.stringify({ type: 'approve_suggestion', id, from: state.peerId }),
+      key
+    );
+    state.ws.send(JSON.stringify({ type: 'encrypted', payload }));
+  } catch (e) {
+    console.error('Approve error:', e);
+    addSystemEvent('❌ 批准失败: ' + e.message);
+  }
+}
+
+async function rejectSuggestion(id) {
+  if (!state.encrypted || !state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  try {
+    const key = state.groupKey || state.aesKey;
+    const payload = await E2E.encrypt(
+      JSON.stringify({ type: 'reject_suggestion', id, from: state.peerId }),
+      key
+    );
+    state.ws.send(JSON.stringify({ type: 'encrypted', payload }));
+  } catch (e) {
+    console.error('Reject error:', e);
+    addSystemEvent('❌ 忽略失败: ' + e.message);
+  }
+}
+
+// onclick 内联调用需要全局可见
+window.approveSuggestion = approveSuggestion;
+window.rejectSuggestion = rejectSuggestion;
+
 // ─── 发送消息 ──────────────────────────────────────────
 async function sendMessage(text) {
   if (!text?.trim()) return;
@@ -303,15 +446,23 @@ async function sendMessage(text) {
     return;
   }
 
-  // 根据角色决定消息类型
+  // owner 发 input (cc 直接执行); observer 发 suggestion (待 owner 批准)
   const msgType = state.role === 'owner' ? 'input' : 'suggestion';
 
-  addUserEvent(text, state.role);
+  // 本地立即显示 (CLI 广播回来时用 peerId 去重)
+  if (msgType === 'input') {
+    addUserEvent(`${state.nickname || 'YOU'}: ${text}`, state.role);
+  } else {
+    addUserEvent(`${state.nickname || 'YOU'} (建议): ${text}`, state.role);
+  }
   $('textInput').value = '';
 
   try {
     const key = state.groupKey || state.aesKey;
-    const payload = await E2E.encrypt(JSON.stringify({ type: msgType, text, from: state.peerId }), key);
+    const payload = await E2E.encrypt(
+      JSON.stringify({ type: msgType, text, from: state.peerId, nickname: state.nickname }),
+      key,
+    );
     state.ws.send(JSON.stringify({ type: 'encrypted', payload }));
   } catch (e) {
     addSystemEvent('❌ 加密发送失败: ' + e.message);
@@ -322,9 +473,8 @@ async function sendMessage(text) {
 function renderTerminalEvent(evt) {
   if (!evt) return;
 
-  // system init
+  // system init — 静音(header 状态点已反映)
   if (evt.type === 'system' && evt.subtype === 'init') {
-    addSystemEvent(`Session: ${evt.session_id || 'started'}`);
     return;
   }
 
@@ -434,10 +584,12 @@ function addSuggestionEvent(from, text) {
   const el = document.createElement('div');
   el.className = 'terminal-event suggestion';
   el.innerHTML = `💡 <strong>${from || 'observer'}</strong>: ${escapeHtml(text)}`;
-  // TODO: Owner 点击可批准执行
   $('terminal').appendChild(el);
   scrollToBottom();
 }
+
+// Phase 4 chat path retired — observer 改回 suggestion 流。
+// 历史 addChatEvent 已删除,如有 type:'chat' 旧消息 fallback 走 suggestion 渲染。
 
 function scrollToBottom() {
   requestAnimationFrame(() => {
@@ -634,3 +786,4 @@ function init() {
     $('pairBtn').disabled = true;
   }
 })();
+// redeploy-1777182078

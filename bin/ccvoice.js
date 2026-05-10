@@ -131,7 +131,8 @@ const E2E = {
 
 // ─── 状态 ──────────────────────────────────────────────
 let relayWs = null;
-let relayCode = null;
+let relayCode = null;       // 配对码 (CLI 启动时生成,owner 用此码首次配对)
+let inviteCode = null;      // 邀请码 (owner 配对成功后生成,给 observer 用)
 let keyPair = null;
 let aesKey = null;       // 配对完成后的共享加密密钥
 let paired = false;
@@ -141,9 +142,11 @@ let sessionId = null;    // Claude CLI session ID (跨消息连续)
 let claudeBusy = false;  // 当前是否有 claude -p 在执行
 let messageQueue = [];   // 排队等待的消息
 
-// 已连接的 peers (role → { publicKey, aesKey })
+// 已连接的 peers (peerId → { role: 'owner'|'observer', aesKey, nickname })
 const peers = new Map();
 let groupKey = null;     // 群组加密密钥 (多人场景)
+// 待处理建议 (id → { id, text, from, nickname, status, createdAt })
+const pendingSuggestions = new Map();
 
 // ─── Claude Code 调用 (每条消息一次 claude -p --resume) ─
 function sendToClaude(text) {
@@ -318,35 +321,141 @@ function broadcastToRemote(msg) {
 
 // 处理远程客户端发来的消息
 function handleRemoteMessage(msg) {
+  // msg.from 是 client 自报 peerId。在 paired 加密信道里,只有持有 group
+  // key 的 peer 能发出能解密的消息,所以 from 在已配对集合内是可信的。
+  const sender = peers.get(msg.from);
+  const senderRole = sender?.role;
+  const senderNick = sender?.nickname || msg.nickname || (msg.from || '').substring(0, 4).toUpperCase();
+
   switch (msg.type) {
     case 'input':
-      // Owner 发来的命令 → 发给 Claude
-      console.log(`\n  📱 [远程输入] ${msg.text.substring(0, 80)}`);
+      // 仅 Owner 可直接发指令;observer 走 suggestion 流程。
+      if (senderRole !== 'owner') {
+        console.log(`  ⚠️  非 owner (${senderNick}) 尝试 input,已拒绝`);
+        break;
+      }
+      console.log(`\n  📱 [${senderNick}] ${msg.text.substring(0, 80)}`);
+      // ★ 广播 owner 输入 — 让所有 downstream 看到 owner 在做什么
+      // (relay 已经移除 D2D 直发,所有可见消息必须由 CLI 广播)
+      broadcastToRemote({
+        type: 'user_input',
+        text: msg.text,
+        from: msg.from,
+        nickname: senderNick,
+        role: 'owner',
+      });
       sendToClaude(msg.text);
       break;
 
-    case 'suggestion':
-      // Observer 的建议 — 显示但不执行
-      console.log(`\n  💡 [建议 from ${msg.from || 'observer'}] ${msg.text}`);
-      broadcastToRemote({ type: 'suggestion', from: msg.from, text: msg.text, id: msg.id });
+    case 'suggestion': {
+      // Observer 建议 — 生成 id,存 pending,广播 suggestion_broadcast
+      const id = crypto.randomBytes(4).toString('hex');
+      const sugg = {
+        id,
+        text: msg.text || '',
+        from: msg.from || 'observer',
+        nickname: senderNick,
+        status: 'pending',
+        createdAt: Date.now(),
+      };
+      pendingSuggestions.set(id, sugg);
+      console.log(`\n  💡 [建议 ${id} from ${senderNick}] ${sugg.text}`);
+      broadcastToRemote({ type: 'suggestion_broadcast', ...sugg });
       break;
+    }
 
-    case 'approve_suggestion':
-      // Owner 批准建议 → 执行
-      if (msg.text) {
-        console.log(`\n  ✅ [批准建议] ${msg.text.substring(0, 80)}`);
-        sendToClaude(msg.text);
+    case 'approve_suggestion': {
+      if (senderRole !== 'owner') {
+        console.log(`  ⚠️  非 owner 尝试批准建议,已拒绝`);
+        break;
       }
+      const sugg = pendingSuggestions.get(msg.id);
+      if (!sugg || sugg.status !== 'pending') break;
+      sugg.status = 'approved';
+      console.log(`  ✅ [批准建议 ${sugg.id}] ${sugg.text.substring(0, 80)}`);
+      broadcastToRemote({ type: 'suggestion_broadcast', ...sugg });
+      sendToClaude(sugg.text);
+      pendingSuggestions.delete(sugg.id);
       break;
+    }
+
+    case 'reject_suggestion': {
+      if (senderRole !== 'owner') break;
+      const sugg = pendingSuggestions.get(msg.id);
+      if (!sugg || sugg.status !== 'pending') break;
+      sugg.status = 'rejected';
+      console.log(`  🚫 [忽略建议 ${sugg.id}]`);
+      broadcastToRemote({ type: 'suggestion_broadcast', ...sugg });
+      pendingSuggestions.delete(sugg.id);
+      break;
+    }
 
     case 'voice_transcript':
-      // 语音转文字结果
-      console.log(`\n  🎤 [语音] ${msg.text.substring(0, 80)}`);
-      sendToClaude(msg.text);
+      // 语音 — Owner 直接执行,Observer 转成建议
+      if (senderRole === 'owner') {
+        console.log(`\n  🎤 [${senderNick}] ${msg.text.substring(0, 80)}`);
+        broadcastToRemote({
+          type: 'user_input',
+          text: msg.text,
+          from: msg.from,
+          nickname: senderNick,
+          role: 'owner',
+        });
+        sendToClaude(msg.text);
+      } else {
+        const id = crypto.randomBytes(4).toString('hex');
+        const sugg = {
+          id,
+          text: msg.text || '',
+          from: msg.from || 'observer',
+          nickname: senderNick,
+          status: 'pending',
+          createdAt: Date.now(),
+        };
+        pendingSuggestions.set(id, sugg);
+        console.log(`\n  🎤💡 [Observer 语音建议 ${id} from ${senderNick}] ${sugg.text}`);
+        broadcastToRemote({ type: 'suggestion_broadcast', ...sugg });
+      }
       break;
 
     default:
       if (flags.verbose) console.log(`  [remote] unknown type: ${msg.type}`);
+  }
+}
+
+// 广播当前参与者列表 (含 CLI 自己 + 所有 paired peer)
+function broadcastParticipants() {
+  const participants = [
+    { id: 'cli', role: 'upstream', nickname: 'Claude Code' },
+    ...[...peers.entries()].map(([id, p]) => ({
+      id,
+      role: p.role,
+      nickname: p.nickname || id.substring(0, 4).toUpperCase(),
+    })),
+  ];
+  broadcastToRemote({ type: 'participants', participants });
+}
+
+// 异步生成邀请码 — owner 配对成功后调用,把别名注册到 relay 的 KV。
+// 失败时降级为复用配对码 (旧行为),保证仍然可用。
+async function generateInviteCode() {
+  try {
+    const res = await fetch(`${RELAY_URL}/api/relay/create-invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomCode: relayCode }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    inviteCode = data.inviteCode;
+    console.log(`\n  🎟️  邀请码: ${inviteCode}`);
+    console.log(`  (配对码 ${relayCode} 仅用于首次配对,邀请码 ${inviteCode} 用于邀请其他设备)\n`);
+    // 通知所有 paired peer (主要是 owner)
+    broadcastToRemote({ type: 'invite_code', inviteCode });
+  } catch (e) {
+    console.error(`  ⚠️  邀请码生成失败: ${e.message},降级使用配对码`);
+    inviteCode = relayCode;
+    broadcastToRemote({ type: 'invite_code', inviteCode });
   }
 }
 
@@ -417,9 +526,22 @@ function handleRelayMessage(msg) {
   // Relay 控制消息
   if (msg.type?.startsWith('relay:')) {
     if (msg.type === 'relay:peer_connected') {
-      console.log(`  📱 ${msg.role === 'owner' ? 'Owner' : 'Observer'} 已连接`);
+      console.log(`  📱 peer 已连接`);
     } else if (msg.type === 'relay:peer_disconnected') {
-      console.log(`  📱 ${msg.role || 'peer'} 已断开`);
+      // 清理 peers 表,避免 ghost 计入 owner 分配
+      const peerId = msg.peerId;
+      if (peerId && peers.has(peerId)) {
+        const wasOwner = peers.get(peerId).role === 'owner';
+        peers.delete(peerId);
+        console.log(`  📱 ${wasOwner ? 'Owner' : 'Observer'} 已断开 (${peerId.substring(0, 8)})`);
+        // 如果 owner 离开且还有 observer,把第一个 observer 升级为 owner
+        if (wasOwner && peers.size > 0) {
+          const [firstId, firstPeer] = [...peers.entries()][0];
+          firstPeer.role = 'owner';
+          console.log(`  👑 ${firstId.substring(0, 8)} 升级为 Owner`);
+        }
+        broadcastParticipants();
+      }
     }
     return;
   }
@@ -431,40 +553,59 @@ function handleRelayMessage(msg) {
       const sharedSecret = E2E.deriveSharedSecret(keyPair.privateKey, peerPubKeyDer);
       const peerAesKey = E2E.deriveAESKey(sharedSecret);
 
-      // 存储 peer
       const peerId = msg.peerId || 'default';
-      const role = msg.role || 'owner';
-      peers.set(peerId, { role, aesKey: peerAesKey });
+      const nickname = (msg.nickname || '').trim() || peerId.substring(0, 4).toUpperCase();
+      const existing = peers.get(peerId);
+      let assignedRole;
+      if (existing) {
+        assignedRole = existing.role;
+      } else {
+        const ownerExists = [...peers.values()].some(p => p.role === 'owner');
+        assignedRole = ownerExists ? 'observer' : 'owner';
+      }
+      peers.set(peerId, { role: assignedRole, aesKey: peerAesKey, nickname });
 
       // 如果是第一个 peer，用这个作为主 aesKey
       if (!aesKey) aesKey = peerAesKey;
 
-      // 生成/更新 group key（多人场景）
+      // ★ 顺序: 先 ack → 再 group_key (避免 race)
+      // (group_key 在 ack 之前到达会因 downstream 没建好 sharedAESKey 解密失败)
+      relayWs.send(JSON.stringify({
+        type: 'pair_handshake_ack',
+        publicKey: keyPair.publicKey.toString('base64'),
+        peerId,
+        role: assignedRole,
+        nickname,
+        inviteCode: inviteCode || null,  // 已有邀请码顺带发过去
+      }));
+
+      paired = true;
+      console.log(`  🔐 E2E 加密已建立 (${assignedRole}: ${nickname} / ${peerId.substring(0, 8)})`);
+
+      // group_key 分发
       if (peers.size > 1 && !groupKey) {
         groupKey = crypto.randomBytes(32);
-        // 给每个 peer 分别加密 group key
         for (const [id, peer] of peers) {
           const encryptedGK = E2E.encrypt(groupKey.toString('base64'), peer.aesKey);
           relayWs.send(JSON.stringify({ type: 'group_key', peerId: id, payload: encryptedGK }));
         }
       } else if (groupKey) {
-        // 新 peer 加入，发 group key
         const encryptedGK = E2E.encrypt(groupKey.toString('base64'), peerAesKey);
         relayWs.send(JSON.stringify({ type: 'group_key', peerId, payload: encryptedGK }));
       }
 
-      // 回复自己的公钥
-      relayWs.send(JSON.stringify({
-        type: 'pair_handshake_ack',
-        publicKey: keyPair.publicKey.toString('base64'),
-        peerId,
-      }));
+      // 第一个 owner 配对成功 → 异步生成邀请码
+      if (assignedRole === 'owner' && !inviteCode) {
+        generateInviteCode();
+      }
 
-      paired = true;
-      console.log(`  🔐 E2E 加密已建立 (${role}: ${peerId.substring(0, 8)}...)`);
-
-      // 发送当前会话状态快照
+      // 发送会话状态 + 参与者列表
       broadcastToRemote({ type: 'session_info', cwd: CLAUDE_CWD, model: CLAUDE_MODEL });
+      broadcastParticipants();
+      // 重发未决建议给新加入的 peer
+      for (const sugg of pendingSuggestions.values()) {
+        broadcastToRemote({ type: 'suggestion_broadcast', ...sugg });
+      }
 
     } catch (e) {
       console.error('  ❌ 配对握手失败:', e.message);
@@ -489,22 +630,17 @@ function handleRelayMessage(msg) {
 
 // ─── 配对信息展示 ──────────────────────────────────────
 function printPairInfo() {
-  // QR 码内容：配对码 + CLI 公钥 + relay 地址
-  const pairData = JSON.stringify({
-    code: relayCode,
-    relay: RELAY_URL,
-    pubKey: keyPair.publicKey.toString('base64'),
-  });
-
+  // QR 编码配对码 URL,owner 首次配对扫这个
   const pairUrl = `${RELAY_URL}/v3/#pair=${relayCode}`;
 
   console.log('');
   console.log('  ╔══════════════════════════════════════════════════╗');
-  console.log('  ║  📱 手机扫码或输入配对码连接:                      ║');
+  console.log('  ║  📱 Owner 首次配对 (扫码或输入):                   ║');
   console.log('  ║                                                  ║');
   console.log(`  ║     配对码:  ${relayCode}                             ║`);
   console.log('  ║                                                  ║');
   console.log('  ║  🔐 端到端加密 (X25519 + AES-256-GCM)            ║');
+  console.log('  ║  Owner 配对成功后会自动生成邀请码给其他设备       ║');
   console.log('  ╚══════════════════════════════════════════════════╝');
   console.log('');
 
