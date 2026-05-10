@@ -154,7 +154,7 @@ let sessionId = null;    // Claude CLI session ID (跨消息连续)
 let claudeBusy = false;  // 当前是否有 claude -p 在执行
 let messageQueue = [];   // 排队等待的消息
 
-// 已连接的 peers (peerId → { role: 'owner'|'observer', aesKey, nickname })
+// 已连接的 peers (peerId → { role: 'owner'|'observer', aesKey, nickname, pubKeyFingerprint })
 const peers = new Map();
 let groupKey = null;     // 群组加密密钥 (多人场景)
 // 待处理建议 (id → { id, text, from, nickname, status, createdAt })
@@ -562,12 +562,20 @@ function handleRelayMessage(msg) {
   if (msg.type === 'pair_handshake') {
     try {
       const peerPubKeyDer = Buffer.from(msg.publicKey, 'base64');
-      const sharedSecret = E2E.deriveSharedSecret(keyPair.privateKey, peerPubKeyDer);
-      const peerAesKey = E2E.deriveAESKey(sharedSecret);
-
+      const fingerprint = crypto.createHash('sha256').update(peerPubKeyDer).digest('hex');
       const peerId = msg.peerId || 'default';
       const nickname = (msg.nickname || '').trim() || peerId.substring(0, 4).toUpperCase();
       const existing = peers.get(peerId);
+
+      // C4: peerId 复用必须带相同公钥指纹
+      if (existing && existing.pubKeyFingerprint !== fingerprint) {
+        console.log(`  🚫 拒绝 handshake: peerId ${peerId.substring(0, 8)} 公钥指纹不匹配 (可能的劫持尝试)`);
+        return;
+      }
+
+      const sharedSecret = E2E.deriveSharedSecret(keyPair.privateKey, peerPubKeyDer);
+      const peerAesKey = E2E.deriveAESKey(sharedSecret);
+
       let assignedRole;
       if (existing) {
         assignedRole = existing.role;
@@ -575,7 +583,13 @@ function handleRelayMessage(msg) {
         const ownerExists = [...peers.values()].some(p => p.role === 'owner');
         assignedRole = ownerExists ? 'observer' : 'owner';
       }
-      peers.set(peerId, { role: assignedRole, aesKey: peerAesKey, nickname });
+
+      peers.set(peerId, {
+        role: assignedRole,
+        aesKey: peerAesKey,
+        nickname,
+        pubKeyFingerprint: fingerprint,
+      });
 
       // 如果是第一个 peer，用这个作为主 aesKey
       if (!aesKey) aesKey = peerAesKey;
@@ -592,7 +606,7 @@ function handleRelayMessage(msg) {
       }));
 
       paired = true;
-      console.log(`  🔐 E2E 加密已建立 (${assignedRole}: ${nickname} / ${peerId.substring(0, 8)})`);
+      console.log(`  🔐 E2E 加密已建立 (${assignedRole}: ${nickname} / ${peerId.substring(0, 8)} / fp:${fingerprint.substring(0, 8)})`);
 
       // group_key 分发
       if (peers.size > 1 && !groupKey) {
