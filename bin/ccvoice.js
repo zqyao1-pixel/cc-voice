@@ -546,12 +546,14 @@ function handleRelayMessage(msg) {
         const wasOwner = peers.get(peerId).role === 'owner';
         peers.delete(peerId);
         console.log(`  📱 ${wasOwner ? 'Owner' : 'Observer'} 已断开 (${peerId.substring(0, 8)})`);
-        // 如果 owner 离开且还有 observer,把第一个 observer 升级为 owner
-        if (wasOwner && peers.size > 0) {
-          const [firstId, firstPeer] = [...peers.entries()][0];
-          firstPeer.role = 'owner';
-          console.log(`  👑 ${firstId.substring(0, 8)} 升级为 Owner`);
+
+        // C3: owner 断线不再自动晋升 observer。房间锁在"无 owner"状态等原 owner 重连。
+        // 现有 input / approve_suggestion 的 senderRole !== 'owner' 检查会自动拒绝所有 observer 操作。
+        if (wasOwner) {
+          console.log(`  🔒 房间已锁定 (无 owner) — 等待原 owner 重连或 ccvoice 重启`);
+          broadcastToRemote({ type: 'owner_gone', message: 'Owner offline. Room locked until original owner reconnects.' });
         }
+
         broadcastParticipants();
       }
     }
